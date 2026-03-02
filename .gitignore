@@ -17,3 +17,4 @@ build/
 .gemini/
 .claude/
 _acp_wrapper_launch.bat
+app.py.acp.bak
