@@ -899,14 +899,20 @@ document.addEventListener('keydown', (e) => {
 function buildStatusPills() {
     const container = document.getElementById('agent-status');
     container.innerHTML = '';
-    for (const [name, cfg] of Object.entries(agentConfig)) {
+    const entries = Object.entries(agentConfig);
+    for (const [name, cfg] of entries) {
         const pill = document.createElement('div');
         pill.className = 'status-pill';
         if (cfg.state === 'pending') pill.classList.add('pending');
         pill.id = `status-${name}`;
         pill.title = `@${name}`;  // Tooltip: canonical name for manual @-typing
         pill.style.setProperty('--agent-color', cfg.color || '#4ade80');
-        pill.innerHTML = `<span class="status-dot"></span><span class="status-label">${escapeHtml(cfg.label || name)}</span>`;
+        const label = cfg.label || name;
+        const avatarSvg = getAvatarSvg(name);
+        pill.innerHTML =
+            `<div class="agent-name-avatar status-avatar">${avatarSvg}</div>` +
+            `<span class="status-dot"></span>` +
+            `<span class="status-label">${escapeHtml(label)}</span>`;
         // Left-click to rename or name pending instance
         pill.addEventListener('click', () => {
             const mode = cfg.state === 'pending' ? 'pending' : 'rename';
@@ -918,6 +924,55 @@ function buildStatusPills() {
         container.appendChild(pill);
     }
     enableDragScroll(container);
+    setupAgentStatusNav();
+}
+
+function updateAgentStatusNav() {
+    const container = document.getElementById('agent-status');
+    if (!container) return;
+    const wrapper = container.parentElement && container.parentElement.classList.contains('agent-status-wrapper')
+        ? container.parentElement
+        : null;
+    if (!wrapper) return;
+    const leftNav = wrapper.querySelector('.agent-status-nav-left');
+    const rightNav = wrapper.querySelector('.agent-status-nav-right');
+    if (!leftNav || !rightNav) return;
+
+    const hasOverflow = container.scrollWidth > container.clientWidth + 2;
+    if (!hasOverflow) {
+        leftNav.classList.add('hidden');
+        rightNav.classList.add('hidden');
+        return;
+    }
+
+    const atStart = container.scrollLeft <= 2;
+    const atEnd = container.scrollLeft + container.clientWidth >= container.scrollWidth - 2;
+
+    leftNav.classList.toggle('hidden', atStart);
+    rightNav.classList.toggle('hidden', atEnd);
+}
+
+function setupAgentStatusNav() {
+    const container = document.getElementById('agent-status');
+    if (!container) return;
+    if (!container._agentNavBound) {
+        container.addEventListener('scroll', updateAgentStatusNav);
+        window.addEventListener('resize', updateAgentStatusNav);
+        container._agentNavBound = true;
+    }
+    updateAgentStatusNav();
+}
+
+function scrollAgentStatus(direction) {
+    const container = document.getElementById('agent-status');
+    if (!container) return;
+    const pills = container.querySelectorAll('.status-pill');
+    if (!pills.length) return;
+    const step = pills[0].offsetWidth || 40;
+    const delta = (direction || 1) * step;
+    container.scrollBy({ left: delta, behavior: 'smooth' });
+    // Allow scroll animation to progress before recalculating
+    setTimeout(updateAgentStatusNav, 250);
 }
 
 // --- Agent naming lightbox ---

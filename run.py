@@ -61,10 +61,21 @@ def main():
     mcp_bridge._ROLES_FILE = data_dir / "roles.json"
     mcp_bridge._load_roles()
 
-    # Start MCP servers in background threads
+    # Parse CLI args once for the whole process
+    args = _parse_args()
+    host = args.host or config.get("server", {}).get("host", "127.0.0.1")
+    port = args.port or config.get("server", {}).get("port", 8300)
+
+    # Start MCP servers in background threads.
+    # When the main server binds to a LAN IP, MCP servers need to be reachable
+    # from both 127.0.0.1 (local proxy/wrappers) and the LAN IP (remote agents),
+    # so we bind to 0.0.0.0 in that case.
     http_port = config.get("mcp", {}).get("http_port", 8200)
     sse_port = config.get("mcp", {}).get("sse_port", 8201)
+    mcp_host = "0.0.0.0" if host not in ("127.0.0.1", "localhost", "::1") else host
+    mcp_bridge.mcp_http.settings.host = mcp_host
     mcp_bridge.mcp_http.settings.port = http_port
+    mcp_bridge.mcp_sse.settings.host = mcp_host
     mcp_bridge.mcp_sse.settings.port = sse_port
 
     threading.Thread(target=mcp_bridge.run_http_server, daemon=True).start()
@@ -100,9 +111,6 @@ def main():
 
     # Run web server
     import uvicorn
-    args = _parse_args()
-    host = args.host or config.get("server", {}).get("host", "127.0.0.1")
-    port = args.port or config.get("server", {}).get("port", 8300)
 
     # --- Security: warn if binding to a non-localhost address ---
     if host not in ("127.0.0.1", "localhost", "::1"):

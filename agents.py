@@ -48,9 +48,9 @@ class AgentTrigger:
         log.info("Queued @%s trigger (ch=%s): %s", agent_name, channel, message[:80])
 
     def trigger_purge(self):
-        """Write purge to each agent's queue so the wrapper injects /clear into the agent terminal."""
+        """Write purge to each registered agent's queue so the wrapper injects /clear."""
         self._data_dir.mkdir(parents=True, exist_ok=True)
-        for name in self._config:
+        for name in self._registry.get_all_names():
             queue_file = self._data_dir / f"{name}_queue.jsonl"
             try:
                 with open(queue_file, "a", encoding="utf-8") as f:

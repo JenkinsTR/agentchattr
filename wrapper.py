@@ -29,6 +29,17 @@ ROOT = Path(__file__).parent
 SERVER_NAME = "agentchattr"
 
 
+def _normalize_host_for_client(host: str | None) -> str:
+    """Return a concrete host name that clients can use for HTTP calls."""
+    if not host:
+        return "127.0.0.1"
+    host = host.strip()
+    # 0.0.0.0 / :: mean "all interfaces" when binding, but are not routable as clients
+    if host in ("0.0.0.0", "::"):
+        return "127.0.0.1"
+    return host
+
+
 # ---------------------------------------------------------------------------
 # Per-instance provider config
 # ---------------------------------------------------------------------------
@@ -151,12 +162,12 @@ def _build_provider_launch(
     return launch_args, launch_env, inject_env
 
 
-def _register_instance(server_port: int, base: str, label: str | None = None) -> dict:
+def _register_instance(server_host: str, server_port: int, base: str, label: str | None = None) -> dict:
     import urllib.request
 
     reg_body = json.dumps({"base": base, "label": label}).encode()
     reg_req = urllib.request.Request(
-        f"http://127.0.0.1:{server_port}/api/register",
+        f"http://{server_host}:{server_port}/api/register",
         method="POST",
         data=reg_body,
         headers={"Content-Type": "application/json"},
@@ -193,11 +204,11 @@ _IDENTITY_HINT = (
 )
 
 
-def _fetch_role(server_port: int, agent_name: str) -> str:
+def _fetch_role(server_host: str, server_port: int, agent_name: str) -> str:
     """Fetch this agent's role from the server status endpoint."""
     try:
         import urllib.request
-        req = urllib.request.Request(f"http://127.0.0.1:{server_port}/api/roles")
+        req = urllib.request.Request(f"http://{server_host}:{server_port}/api/roles")
         with urllib.request.urlopen(req, timeout=3) as resp:
             roles = json.loads(resp.read())
         return roles.get(agent_name, "")
@@ -205,8 +216,16 @@ def _fetch_role(server_port: int, agent_name: str) -> str:
         return ""
 
 
-def _queue_watcher(get_identity_fn, inject_fn, *, is_multi_instance: bool = False, trigger_flag=None,
-                   server_port: int = 8300, agent_name: str = ""):
+def _queue_watcher(
+    get_identity_fn,
+    inject_fn,
+    *,
+    is_multi_instance: bool = False,
+    trigger_flag=None,
+    server_host: str = "127.0.0.1",
+    server_port: int = 8300,
+    agent_name: str = "",
+):
     """Poll queue file and inject an MCP read task when triggered."""
     first_mention = True
     while True:
@@ -238,7 +257,7 @@ def _queue_watcher(get_identity_fn, inject_fn, *, is_multi_instance: bool = Fals
                     time.sleep(0.5)
                     prompt = f"mcp read #{channel} - you were mentioned, take appropriate action"
                     # Append role if set
-                    role = _fetch_role(server_port, agent_name)
+                    role = _fetch_role(server_host, server_port, agent_name)
                     if role:
                         prompt += f" - your role: {role}"
                     if first_mention and is_multi_instance:
@@ -275,13 +294,15 @@ def main():
     agent_cfg = config.get("agents", {}).get(agent, {})
     cwd = agent_cfg.get("cwd", ".")
     command = agent_cfg.get("command", agent)
-    data_dir = ROOT / config.get("server", {}).get("data_dir", "./data")
+    server_cfg = config.get("server", {})
+    server_host = _normalize_host_for_client(server_cfg.get("host", "127.0.0.1"))
+    data_dir = ROOT / server_cfg.get("data_dir", "./data")
     data_dir.mkdir(parents=True, exist_ok=True)
-    server_port = config.get("server", {}).get("port", 8300)
+    server_port = server_cfg.get("port", 8300)
     mcp_cfg = config.get("mcp", {})
 
     try:
-        registration = _register_instance(server_port, agent, args.label)
+        registration = _register_instance(server_host, server_port, agent, args.label)
     except Exception as exc:
         print(f"  Registration failed ({exc}).")
         print("  Wrapper cannot continue without a registered identity.")
@@ -294,8 +315,10 @@ def main():
     proxy = None
     proxy_url = None
 
-    # Claude and Gemini connect directly to the server with bearer token ÔÇö no proxy.
+    # Claude and Gemini connect directly to the server with bearer token.
     # Codex still uses the local proxy for sender injection.
+    # The proxy always connects to 127.0.0.1 because MCP servers bind locally
+    # (even when the API server is on a LAN IP).
     if agent not in ("claude", "gemini"):
         from mcp_proxy import McpIdentityProxy
 
@@ -341,7 +364,7 @@ def main():
             return
         try:
             http_port = mcp_cfg.get("http_port", 8200)
-            server_url = f"http://127.0.0.1:{http_port}/mcp"
+            server_url = f"http://{server_host}:{http_port}/mcp"
             proj_dir = (ROOT / cwd).resolve()
             project_servers = _read_project_mcp_servers(proj_dir)
             _write_claude_mcp_config(
@@ -423,7 +446,7 @@ def main():
         while True:
             current_name, _ = get_identity()
             current_token = get_token()
-            url = f"http://127.0.0.1:{server_port}/api/heartbeat/{current_name}"
+            url = f"http://{server_host}:{server_port}/api/heartbeat/{current_name}"
             try:
                 req = urllib.request.Request(
                     url,
@@ -439,7 +462,7 @@ def main():
             except urllib.error.HTTPError as exc:
                 if exc.code == 409:
                     try:
-                        replacement = _register_instance(server_port, agent, args.label)
+                        replacement = _register_instance(server_host, server_port, agent, args.label)
                         set_runtime_identity(replacement["name"], replacement["token"])
                         _notify_recovery(data_dir, replacement["name"])
                     except Exception:
@@ -465,8 +488,13 @@ def main():
         _watcher_thread = threading.Thread(
             target=_queue_watcher,
             args=(get_identity, inject_fn),
-            kwargs={"is_multi_instance": _is_multi_instance, "trigger_flag": _trigger_flag,
-                    "server_port": server_port, "agent_name": assigned_name},
+            kwargs={
+                "is_multi_instance": _is_multi_instance,
+                "trigger_flag": _trigger_flag,
+                "server_host": server_host,
+                "server_port": server_port,
+                "agent_name": assigned_name,
+            },
             daemon=True,
         )
         _watcher_thread.start()
@@ -479,7 +507,13 @@ def main():
                 _watcher_thread = threading.Thread(
                     target=_queue_watcher,
                     args=(get_identity, _watcher_inject_fn),
-                    kwargs={"is_multi_instance": _is_multi_instance, "trigger_flag": _trigger_flag},
+                    kwargs={
+                        "is_multi_instance": _is_multi_instance,
+                        "trigger_flag": _trigger_flag,
+                        "server_host": server_host,
+                        "server_port": server_port,
+                        "agent_name": assigned_name,
+                    },
                     daemon=True,
                 )
                 _watcher_thread.start()
@@ -523,7 +557,7 @@ def main():
                 if should_send:
                     current_name, _ = get_identity()
                     current_token = get_token()
-                    url = f"http://127.0.0.1:{server_port}/api/heartbeat/{current_name}"
+                    url = f"http://{server_host}:{server_port}/api/heartbeat/{current_name}"
                     body = json.dumps({"active": active}).encode()
                     req = urllib.request.Request(
                         url,
@@ -585,7 +619,7 @@ def main():
             current_name, _ = get_identity()
             current_token = get_token()
             dereg_req = urllib.request.Request(
-                f"http://127.0.0.1:{server_port}/api/deregister/{current_name}",
+                f"http://{server_host}:{server_port}/api/deregister/{current_name}",
                 method="POST",
                 data=b"",
                 headers=_auth_headers(current_token),

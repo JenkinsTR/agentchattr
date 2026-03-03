@@ -823,6 +823,14 @@ async def websocket_endpoint(websocket: WebSocket):
                             await broadcast_clear()
                         continue
 
+                    if cmd == "/purge":
+                        store.clear()
+                        import mcp_bridge
+                        mcp_bridge.reset_cursors()
+                        agents.trigger_purge()
+                        await broadcast_clear()
+                        continue
+
                     if cmd == "/continue":
                         router.continue_routing()
                         store.add("system", "Resuming agent conversation...", msg_type="system", channel=channel)
